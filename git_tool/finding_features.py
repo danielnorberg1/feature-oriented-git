@@ -1,5 +1,7 @@
+import json
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import List, Optional
 
@@ -54,8 +56,45 @@ def get_features_for_diff(diff: Diff) -> list[FeatureMatches]:
     return features
 
 
+FEATURE_MAP_FILENAME = ".feature-map.json"
+
+
+def _find_feature_map() -> Path | None:
+    """Walk up from cwd to find a .feature-map.json file."""
+    current = Path.cwd()
+    for parent in [current, *current.parents]:
+        candidate = parent / FEATURE_MAP_FILENAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _load_feature_map() -> list[dict]:
+    """Load mappings from .feature-map.json. Returns empty list if not found."""
+    path = _find_feature_map()
+    if path is None:
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("mappings", [])
+
+
+def _features_from_file_mapping(file_name: str) -> list[str]:
+    """Match a file path against glob patterns in .feature-map.json."""
+    mappings = _load_feature_map()
+    try:
+        rel_path = str(Path(file_name).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        rel_path = file_name
+    features = []
+    for entry in mappings:
+        if fnmatch(rel_path, entry["pattern"]):
+            features.append(entry["feature"])
+    return features
+
+
 def features_for_file_by_annotation(file_name: str) -> list[str]:
-    assigned_by_file = []
+    assigned_by_file = _features_from_file_mapping(file_name)
     assigned_by_folder = []
     with open(file_name, "r") as f:
         matches = extract_features_from_annotation(f.read())

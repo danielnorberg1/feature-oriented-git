@@ -88,3 +88,56 @@ def test_features_for_file_by_annotation_returns_strings(tmp_path):
     assert result == ["Login", "Signup"]
     assert all(isinstance(name, str) for name in result)
 
+
+def test_features_from_file_mapping(tmp_path, monkeypatch):
+    """File mapping should match glob patterns from .feature-map.json."""
+    import json
+
+    # Create a .feature-map.json in the tmp directory
+    feature_map = {
+        "mappings": [
+            {"pattern": "src/auth/*", "feature": "Login"},
+            {"pattern": "src/checkout/*", "feature": "Checkout"},
+        ]
+    }
+    (tmp_path / ".feature-map.json").write_text(json.dumps(feature_map))
+
+    # Create a source file under src/auth/
+    auth_dir = tmp_path / "src" / "auth"
+    auth_dir.mkdir(parents=True)
+    source_file = auth_dir / "handler.py"
+    source_file.write_text("# no annotations\n")
+
+    # Set cwd to tmp_path so the feature map is found
+    monkeypatch.chdir(tmp_path)
+
+    result = finding_features.features_for_file_by_annotation(str(source_file))
+    assert "Login" in result
+
+
+def test_features_from_file_mapping_combined_with_annotations(tmp_path, monkeypatch):
+    """File mapping and annotations should be combined."""
+    import json
+
+    feature_map = {
+        "mappings": [
+            {"pattern": "src/*", "feature": "MappedFeature"},
+        ]
+    }
+    (tmp_path / ".feature-map.json").write_text(json.dumps(feature_map))
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    source_file = src_dir / "app.py"
+    source_file.write_text(
+        "# &begin[AnnotatedFeature]\n"
+        + "code()\n"
+        + "# &end[AnnotatedFeature]\n"
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    result = finding_features.features_for_file_by_annotation(str(source_file))
+    assert "MappedFeature" in result
+    assert "AnnotatedFeature" in result
+
