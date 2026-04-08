@@ -58,7 +58,8 @@ def features_for_file_by_annotation(file_name: str) -> list[str]:
     assigned_by_file = []
     assigned_by_folder = []
     with open(file_name, "r") as f:
-        assigned_in_code = extract_features_from_annotation(f.read())
+        matches = extract_features_from_annotation(f.read())
+    assigned_in_code = [m.name for m in matches]
     return assigned_by_file + assigned_by_folder + assigned_in_code
 
 

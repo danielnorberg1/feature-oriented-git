@@ -57,50 +57,46 @@ def get_files_by_git_change() -> GitChanges:
         return dict(changes)
 
 
-def find_annotations_for_file(file: str):
+def find_annotations_for_file(file: str) -> List[str]:
     """
     Parse file for comment-based feature hints and search for file and folder annotations.
     This makes use of the feature-annotation system. Not documented further here.
     """
-    raise NotImplementedError
+    from git_tool.finding_features import features_for_file_by_annotation
+    return features_for_file_by_annotation(file)
 
 # Usage: FEATURE ADD-FROM-STAGED, BLAME, STATUS
-def get_features_for_file(
-    file_path: str, use_annotations: bool = False
-) -> List[str]:
+def get_features_for_file(file_path: str) -> List[str]:
     """
-    Retrieves features for a given file.
-
-    This function determines which features are associated with a specific file
-    in a Git repository. It can use either feature annotations or the commit history
-    to determine these associations.
-
-    If the `use_annotations` flag is set to True, the function searches for annotations
-    in the folder, file, and line levels. Otherwise, it examines the commit history to
-    identify features associated with the file.
+    Retrieves features for a given file by combining all available derivation sources:
+    1. Code annotations (&begin[Feature]/&end[Feature])
+    2. Metadata branch history (commit-to-feature mappings)
 
     Args:
         file_path (str): The path to the file whose features are to be retrieved.
-        use_annotations (bool): Flag indicating whether to use annotations for
-                                determining features. Defaults to False.
 
     Returns:
         List[str]: A list of features associated with the file. If no features are
                    found, an empty list is returned.
     """
-    features = []
-    if use_annotations:
-        features = find_annotations_for_file(file_path)
-        return features
+    features = set()
 
+    # Source 1: annotations in the file
+    try:
+        features.update(find_annotations_for_file(file_path))
+    except (FileNotFoundError, OSError):
+        pass
+
+    # Source 2: metadata branch history
     commits = get_commits_for_file(file_name=file_path, branch_name=None)
     with branch_folder_list() as (feature_folders, _):
         for commit in commits:
             for feature in feature_folders:
                 feature_name = get_feature_name_from_folder(feature)
                 if commit_in_feature_folder(commit, feature_name):
-                    features.append(feature_name)
-    return features
+                    features.add(feature_name)
+
+    return list(features)
 
 # Usages: FEATURE INFO, FEATURE STATUS
 def get_commits_for_feature(feature_uuid: str) -> list[Commit]:
