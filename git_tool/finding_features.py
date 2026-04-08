@@ -1,5 +1,7 @@
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional
 
 from git import Diff
 
@@ -59,5 +61,51 @@ def features_for_file_by_annotation(file_name: str) -> list[str]:
         assigned_in_code = extract_features_from_annotation(f.read())
     return assigned_by_file + assigned_by_folder + assigned_in_code
 
+
+def build_feature_mapping_from_file(
+    file_path: str, commit_sha: Optional[str] = None 
+) -> List[FeatureMapping]:
+    # Read the file as a list of lines so we can track line numbers.
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    
+    mappings: List[FeatureMapping] = []
+    active_feature = None
+    begin_line = None
+
+    for index, line in enumerate(lines, start=1):
+        # Detect the begin marker and remember the feature name.
+        begin_match = re.match(r".*&begin\[(?P<FeatureName>.*?)\].*", line)
+        if begin_match:
+           active_feature = begin_match.group("FeatureName")
+           # The annotated code body starts on the next line.
+           begin_line = index + 1
+           continue
+        # Detect the matching end marker for the active feature.
+        end_match = re.match(r".*&end\[(?P<FeatureName>.*?)\].*", line)
+        if (
+            end_match
+            and active_feature == end_match.group("FeatureName")
+            and begin_line is not None
+        ):
+            # The annotated body ends on the line before the end marker.
+            end_line = index - 1
+            mappings.append(
+                FeatureMapping(
+                    feature_id=active_feature,
+                    file_path=str(Path(file_path).resolve()),
+                    start_line=begin_line,
+                    end_line=end_line,
+                    commit_sha=commit_sha,
+                )
+            )
+            # Reset state for the next annotation.
+            active_feature = None
+            begin_line = None
+
+    return mappings
+        
+        
+        
 
 
