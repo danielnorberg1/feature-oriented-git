@@ -70,3 +70,21 @@ def test_build_feature_mapping_from_file(tmp_path):
     assert mapping.start_line == 3
     assert mapping.end_line == 3
 
+
+def test_features_for_file_by_annotation_returns_strings(tmp_path):
+    """features_for_file_by_annotation should return a list of feature name strings."""
+    file_path = tmp_path / "annotated.py"
+    file_path.write_text(
+        "# &begin[Login]\n"
+        + "do_login()\n"
+        + "# &end[Login]\n"
+        + "# &begin[Signup]\n"
+        + "do_signup()\n"
+        + "# &end[Signup]\n"
+    )
+
+    result = finding_features.features_for_file_by_annotation(str(file_path))
+
+    assert result == ["Login", "Signup"]
+    assert all(isinstance(name, str) for name in result)
+
