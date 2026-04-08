@@ -9,6 +9,14 @@ class FeatureMatches:
     name: str
     code: str
 
+@dataclass
+class FeatureMapping:
+    feature_id: str
+    file_path: str
+    start_line: int
+    end_line: int
+    commit_sha: str | None = None
+
 
 def extract_features_from_annotation(text: str) -> list[FeatureMatches]:
     """Extract Features as well as information about their location in code depending on
@@ -50,3 +58,6 @@ def features_for_file_by_annotation(file_name: str) -> list[str]:
     with open(file_name, "r") as f:
         assigned_in_code = extract_features_from_annotation(f.read())
     return assigned_by_file + assigned_by_folder + assigned_in_code
+
+
+
