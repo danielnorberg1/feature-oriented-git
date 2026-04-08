@@ -47,3 +47,26 @@ def test_git_features(git_repo):
     assert (
         found_features[0].name == "Feature1"
     ), "Expecting to find the correct name for feature"
+
+
+def test_build_feature_mapping_from_file(tmp_path):
+    # Create a temporary source file with an annotation block.
+    file_path = tmp_path / "sample.py"
+    file_path.write_text(
+        "# before\n"
+        + "# &begin[FeatureA]\n"
+        + "print('A')\n"
+        + "# &end[FeatureA]\n"
+        + "# after\n"
+    )
+
+    # Build feature mappings from the file and verify the result.
+    mappings = finding_features.build_feature_mapping_from_file(str(file_path))
+
+    assert len(mappings) == 1
+    mapping = mappings[0]
+    assert mapping.feature_id == "FeatureA"
+    assert mapping.file_path == str(file_path.resolve())
+    assert mapping.start_line == 3
+    assert mapping.end_line == 3
+
