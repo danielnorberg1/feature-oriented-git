@@ -141,3 +141,92 @@ def test_features_from_file_mapping_combined_with_annotations(tmp_path, monkeypa
     assert "MappedFeature" in result
     assert "AnnotatedFeature" in result
 
+
+def test_build_feature_mapping_includes_file_config(tmp_path, monkeypatch):
+    """build_feature_mapping_from_file should return FeatureMappings from both annotations and file config."""
+    import json
+
+    feature_map = {
+        "mappings": [
+            {"pattern": "src/*", "feature": "ConfigFeature"},
+        ]
+    }
+    (tmp_path / ".feature-map.json").write_text(json.dumps(feature_map))
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    source_file = src_dir / "module.py"
+    source_file.write_text(
+        "# preamble\n"
+        "# &begin[InlineFeature]\n"
+        "do_stuff()\n"
+        "# &end[InlineFeature]\n"
+        "# end\n"
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    mappings = finding_features.build_feature_mapping_from_file(str(source_file))
+
+    feature_ids = [m.feature_id for m in mappings]
+    assert "InlineFeature" in feature_ids
+    assert "ConfigFeature" in feature_ids
+
+    # Inline annotation should have precise line range
+    inline = [m for m in mappings if m.feature_id == "InlineFeature"][0]
+    assert inline.start_line == 3
+    assert inline.end_line == 3
+
+    # File-config mapping should cover the whole file
+    config = [m for m in mappings if m.feature_id == "ConfigFeature"][0]
+    assert config.start_line == 1
+    assert config.end_line == 5  # 5 lines total
+
+
+def test_derive_features_from_commit(git_repo):
+    """Auto-derivation should extract feature names from annotated files in a commit."""
+    from git_tool.finding_features import derive_features_from_commit
+
+    repo_path = Path(git_repo.working_tree_dir)
+
+    # Initial commit so HEAD exists
+    init_file = repo_path / "init.txt"
+    init_file.write_text("init\n")
+    git_repo.index.add([str(init_file)])
+    git_repo.index.commit("Initial commit")
+
+    # Create a file with feature annotations
+    feature_file = repo_path / "auth.py"
+    feature_file.write_text(
+        "# &begin[Login]\n"
+        + "def login(): pass\n"
+        + "# &end[Login]\n"
+    )
+    git_repo.index.add([str(feature_file)])
+    commit = git_repo.index.commit("Add login feature")
+
+    result = derive_features_from_commit(commit)
+    assert "Login" in result
+
+
+def test_derive_features_skips_deleted_files(git_repo):
+    """Auto-derivation should gracefully skip files that were deleted in the commit."""
+    from git_tool.finding_features import derive_features_from_commit
+
+    repo_path = Path(git_repo.working_tree_dir)
+
+    # Create and commit a file
+    temp_file = repo_path / "temp.py"
+    temp_file.write_text("# &begin[TempFeature]\ncode()\n# &end[TempFeature]\n")
+    git_repo.index.add([str(temp_file)])
+    git_repo.index.commit("Add temp file")
+
+    # Delete and commit
+    temp_file.unlink()
+    git_repo.index.remove([str(temp_file)])
+    delete_commit = git_repo.index.commit("Remove temp file")
+
+    # Should not crash, should return empty (file no longer exists to read annotations from)
+    result = derive_features_from_commit(delete_commit)
+    assert isinstance(result, list)
+

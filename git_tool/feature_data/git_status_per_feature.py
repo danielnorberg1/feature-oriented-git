@@ -11,6 +11,15 @@ from git_tool.feature_data.models_and_context.repo_context import (
 )
 
 
+from enum import Enum
+
+
+class DerivationSource(str, Enum):
+    ANNOTATION = "annotation"
+    FILE_CONFIG = "file-config"
+    HISTORY = "history"
+
+
 class GitChanges(TypedDict):
     """
     List files by git status
@@ -66,35 +75,51 @@ def find_annotations_for_file(file: str) -> List[str]:
     return features_for_file_by_annotation(file)
 
 # Usage: FEATURE ADD-FROM-STAGED, BLAME, STATUS
-def get_features_for_file(file_path: str) -> List[str]:
+def get_features_for_file(
+    file_path: str, include_history: bool = False
+) -> List[str]:
     """
-    Retrieves features for a given file by combining all available derivation sources:
-    1. Code annotations (&begin[Feature]/&end[Feature])
-    2. Metadata branch history (commit-to-feature mappings)
+    Retrieves features for a given file using authority ordering:
+
+    AUTHORITATIVE sources (always used):
+        1. Code annotations (&begin[Feature]/&end[Feature])
+        2. File-config mappings (.feature-map.json)
+
+    FALLBACK source (only when no authoritative features found, or explicitly requested):
+        3. Metadata branch history (commit-to-feature mappings)
+
+    Annotations represent the current truth of the feature model.
+    History is a secondary signal — useful for archaeology but noisy
+    after refactorings, as it accumulates features from all past commits.
 
     Args:
-        file_path (str): The path to the file whose features are to be retrieved.
+        file_path: The path to the file whose features are to be retrieved.
+        include_history: If True, always include history-based features
+                         alongside authoritative sources.
 
     Returns:
-        List[str]: A list of features associated with the file. If no features are
-                   found, an empty list is returned.
+        A deduplicated list of features associated with the file.
     """
+    from git_tool.finding_features import build_feature_mapping_from_file
+
     features = set()
 
-    # Source 1: annotations in the file
+    # Authoritative: annotations + file-config
     try:
-        features.update(find_annotations_for_file(file_path))
+        for m in build_feature_mapping_from_file(file_path):
+            features.add(m.feature_id)
     except (FileNotFoundError, OSError):
         pass
 
-    # Source 2: metadata branch history
-    commits = get_commits_for_file(file_name=file_path, branch_name=None)
-    with branch_folder_list() as (feature_folders, _):
-        for commit in commits:
-            for feature in feature_folders:
-                feature_name = get_feature_name_from_folder(feature)
-                if commit_in_feature_folder(commit, feature_name):
-                    features.add(feature_name)
+    # Fallback: metadata branch history (only if no authoritative features, or forced)
+    if not features or include_history:
+        commits = get_commits_for_file(file_name=file_path, branch_name=None)
+        with branch_folder_list() as (feature_folders, _):
+            for commit in commits:
+                for feature in feature_folders:
+                    feature_name = get_feature_name_from_folder(feature)
+                    if commit_in_feature_folder(commit, feature_name):
+                        features.add(feature_name)
 
     return list(features)
 
