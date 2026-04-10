@@ -11,6 +11,15 @@ from git_tool.feature_data.models_and_context.repo_context import (
 )
 
 
+from enum import Enum
+
+
+class DerivationSource(str, Enum):
+    ANNOTATION = "annotation"
+    FILE_CONFIG = "file-config"
+    HISTORY = "history"
+
+
 class GitChanges(TypedDict):
     """
     List files by git status
@@ -57,50 +66,62 @@ def get_files_by_git_change() -> GitChanges:
         return dict(changes)
 
 
-def find_annotations_for_file(file: str):
+def find_annotations_for_file(file: str) -> List[str]:
     """
     Parse file for comment-based feature hints and search for file and folder annotations.
     This makes use of the feature-annotation system. Not documented further here.
     """
-    raise NotImplementedError
+    from git_tool.finding_features import features_for_file_by_annotation
+    return features_for_file_by_annotation(file)
 
 # Usage: FEATURE ADD-FROM-STAGED, BLAME, STATUS
 def get_features_for_file(
-    file_path: str, use_annotations: bool = False
+    file_path: str, include_history: bool = False
 ) -> List[str]:
     """
-    Retrieves features for a given file.
+    Retrieves features for a given file using authority ordering:
 
-    This function determines which features are associated with a specific file
-    in a Git repository. It can use either feature annotations or the commit history
-    to determine these associations.
+    AUTHORITATIVE sources (always used):
+        1. Code annotations (&begin[Feature]/&end[Feature])
+        2. File-config mappings (.feature-map.json)
 
-    If the `use_annotations` flag is set to True, the function searches for annotations
-    in the folder, file, and line levels. Otherwise, it examines the commit history to
-    identify features associated with the file.
+    FALLBACK source (only when no authoritative features found, or explicitly requested):
+        3. Metadata branch history (commit-to-feature mappings)
+
+    Annotations represent the current truth of the feature model.
+    History is a secondary signal — useful for archaeology but noisy
+    after refactorings, as it accumulates features from all past commits.
 
     Args:
-        file_path (str): The path to the file whose features are to be retrieved.
-        use_annotations (bool): Flag indicating whether to use annotations for
-                                determining features. Defaults to False.
+        file_path: The path to the file whose features are to be retrieved.
+        include_history: If True, always include history-based features
+                         alongside authoritative sources.
 
     Returns:
-        List[str]: A list of features associated with the file. If no features are
-                   found, an empty list is returned.
+        A deduplicated list of features associated with the file.
     """
-    features = []
-    if use_annotations:
-        features = find_annotations_for_file(file_path)
-        return features
+    from git_tool.finding_features import build_feature_mapping_from_file
 
-    commits = get_commits_for_file(file_name=file_path, branch_name=None)
-    with branch_folder_list() as (feature_folders, _):
-        for commit in commits:
-            for feature in feature_folders:
-                feature_name = get_feature_name_from_folder(feature)
-                if commit_in_feature_folder(commit, feature_name):
-                    features.append(feature_name)
-    return features
+    features = set()
+
+    # Authoritative: annotations + file-config
+    try:
+        for m in build_feature_mapping_from_file(file_path):
+            features.add(m.feature_id)
+    except (FileNotFoundError, OSError):
+        pass
+
+    # Fallback: metadata branch history (only if no authoritative features, or forced)
+    if not features or include_history:
+        commits = get_commits_for_file(file_name=file_path, branch_name=None)
+        with branch_folder_list() as (feature_folders, _):
+            for commit in commits:
+                for feature in feature_folders:
+                    feature_name = get_feature_name_from_folder(feature)
+                    if commit_in_feature_folder(commit, feature_name):
+                        features.add(feature_name)
+
+    return list(features)
 
 # Usages: FEATURE INFO, FEATURE STATUS
 def get_commits_for_feature(feature_uuid: str) -> list[Commit]:

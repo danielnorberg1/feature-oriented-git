@@ -13,6 +13,7 @@ from git_tool.feature_data.models_and_context.feature_state import (
     reset_staged_featureset,
 )
 from git_tool.feature_data.models_and_context.repo_context import repo_context, sync_feature_branch
+from git_tool.finding_features import derive_features_from_commit
 
 
 app = typer.Typer(
@@ -57,8 +58,13 @@ def feature_commit(
         staged_features = read_staged_featureset()
         typer.echo(f"Selecting features {staged_features}")
         if not staged_features:
-            typer.echo("No feature information available.", err=True)
-            return
+            # Auto-derive: extract features from files touched by this commit
+            staged_features = derive_features_from_commit(commit_obj)
+            if staged_features:
+                typer.echo(f"Auto-derived features from annotations: {staged_features}")
+            else:
+                typer.echo("No feature information available.", err=True)
+                return
     else:
         staged_features = features
         typer.echo(f"Selecting features from cli parameters {staged_features}")
