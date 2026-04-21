@@ -1,6 +1,9 @@
+from contextlib import contextmanager
 from pathlib import Path
 
 from git_tool import finding_features
+from git_tool.ci.subcommands import feature_commit
+from typer.testing import CliRunner
 
 TESTSTRING = """
     Hier ist etwas Code &begin[FEATURE1]
@@ -229,4 +232,24 @@ def test_derive_features_skips_deleted_files(git_repo):
     # Should not crash, should return empty (file no longer exists to read annotations from)
     result = derive_features_from_commit(delete_commit)
     assert isinstance(result, list)
+
+
+def test_feature_sync_command_calls_sync_feature_branch(monkeypatch):
+    """The sync command should call the feature branch synchronizer."""
+    @contextmanager
+    def dummy_context():
+        yield None
+
+    monkeypatch.setattr(feature_commit, "repo_context", dummy_context)
+
+    sync_called = []
+
+    def fake_sync():
+        sync_called.append(True)
+
+    monkeypatch.setattr(feature_commit, "sync_feature_branch", fake_sync)
+
+    feature_commit.sync_feature_metadata()
+
+    assert sync_called == [True]
 
