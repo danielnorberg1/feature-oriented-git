@@ -112,34 +112,31 @@ def build_feature_mapping_from_file(
     line_count = len(lines)
     mappings: List[FeatureMapping] = []
 
-    # Source 1: inline annotations (line-level precision)
-    active_feature = None
-    begin_line = None
+    # Source 1: inline annotations (line-level precision, stack-based for nesting)
+    feature_stack: list[tuple[str, int]] = []  # (feature_name, begin_content_line)
 
     for index, line in enumerate(lines, start=1):
         begin_match = re.match(r".*&begin\[(?P<FeatureName>.*?)\].*", line)
         if begin_match:
-           active_feature = begin_match.group("FeatureName")
-           begin_line = index + 1
-           continue
+            feature_stack.append((begin_match.group("FeatureName"), index + 1))
+            continue
         end_match = re.match(r".*&end\[(?P<FeatureName>.*?)\].*", line)
         if (
             end_match
-            and active_feature == end_match.group("FeatureName")
-            and begin_line is not None
+            and feature_stack
+            and feature_stack[-1][0] == end_match.group("FeatureName")
         ):
+            feature_name, begin_line = feature_stack.pop()
             end_line = index - 1
             mappings.append(
                 FeatureMapping(
-                    feature_id=active_feature,
+                    feature_id=feature_name,
                     file_path=resolved_path,
                     start_line=begin_line,
                     end_line=end_line,
                     commit_sha=commit_sha,
                 )
             )
-            active_feature = None
-            begin_line = None
 
     # Source 2: file-config mappings (whole-file scope)
     for feature_name in _features_from_file_mapping(file_path):
