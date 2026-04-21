@@ -230,3 +230,36 @@ def test_derive_features_skips_deleted_files(git_repo):
     result = derive_features_from_commit(delete_commit)
     assert isinstance(result, list)
 
+
+def test_build_feature_mapping_nested_annotations(tmp_path):
+    """Nested annotations should produce separate FeatureMappings for each level."""
+    file_path = tmp_path / "nested.py"
+    file_path.write_text(
+        "# before\n"
+        "# &begin[Auth]\n"
+        "authenticate()\n"
+        "# &begin[OAuth]\n"
+        "oauth_flow()\n"
+        "# &end[OAuth]\n"
+        "validate()\n"
+        "# &end[Auth]\n"
+        "# after\n"
+    )
+
+    mappings = finding_features.build_feature_mapping_from_file(str(file_path))
+
+    feature_ids = [m.feature_id for m in mappings]
+    assert "Auth" in feature_ids
+    assert "OAuth" in feature_ids
+
+    auth = [m for m in mappings if m.feature_id == "Auth"][0]
+    oauth = [m for m in mappings if m.feature_id == "OAuth"][0]
+
+    # Auth spans lines 3-7 (authenticate, &begin[OAuth], oauth_flow, &end[OAuth], validate)
+    assert auth.start_line == 3
+    assert auth.end_line == 7
+
+    # OAuth spans line 5 only (oauth_flow)
+    assert oauth.start_line == 5
+    assert oauth.end_line == 5
+
