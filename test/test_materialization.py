@@ -9,6 +9,7 @@ from git_tool.materialization import (
     materialize_file,
     materialize_projection,
     should_include_file,
+    sync_projection_back,
 )
 
 
@@ -298,3 +299,60 @@ def test_projection_refuses_overwrite_with_user_commits(proj_repo):
 
     with pytest.raises(RuntimeError, match="beyond the projection"):
         materialize_projection(proj_repo, {"Login"}, "project/Login")
+
+
+def test_sync_projection_back_applies_projection_edits(proj_repo):
+    root = Path(proj_repo.working_tree_dir)
+
+    src = root / "app.py"
+    src.write_text("# shared\n# &begin[Login]\nlogin_v1()\n# &end[Login]\n")
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Add Login v1")
+
+    source_branch = proj_repo.active_branch.name
+    materialize_projection(proj_repo, {"Login"}, "project/Login")
+    proj_repo.git.checkout("project/Login")
+
+    # Edit the projected variant
+    src.write_text("# shared\n# &begin[Login]\nlogin_v2()\n# &end[Login]\n")
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Update projected login")
+
+    proj_repo.git.checkout(source_branch)
+    sync_projection_back(proj_repo, "project/Login", source_branch)
+
+    assert "login_v2()" in src.read_text()
+
+
+def test_sync_projection_back_ignores_projection_deletions(proj_repo):
+    root = Path(proj_repo.working_tree_dir)
+
+    src = root / "main.py"
+    src.write_text("main()\n")
+    src1 = root / "checkout.py"
+    src1.write_text("checkout()\n")
+    proj_repo.index.add(["main.py", "checkout.py"])
+    proj_repo.index.commit("Add files")
+
+    feature_map = {"mappings": [{"pattern": "checkout.py", "feature": "Checkout"}]}
+    (root / ".feature-map.json").write_text(json.dumps(feature_map))
+    proj_repo.index.add([".feature-map.json"])
+    proj_repo.index.commit("Add feature map")
+
+    source_branch = proj_repo.active_branch.name
+    materialize_projection(proj_repo, {"Login"}, "project/Login")
+    proj_repo.git.checkout("project/Login")
+
+    # projected branch should remove checkout.py
+    assert not (root / "checkout.py").exists()
+
+    # make a change to main.py on the projection branch
+    src.write_text("main()\nupdated()\n")
+    proj_repo.index.add(["main.py"])
+    proj_repo.index.commit("Update projected main")
+
+    proj_repo.git.checkout(source_branch)
+    sync_projection_back(proj_repo, "project/Login", source_branch)
+
+    assert (root / "checkout.py").exists()
+    assert "updated()" in src.read_text()
