@@ -72,6 +72,24 @@ Assign features to a commit retroactively. To find all commits that have not yet
 git feature commit <commit_id> <features>
 ```
 
+### `git feature project`
+Create a projected variant branch containing only the selected features.
+This removes unselected annotated code blocks and excludes files mapped only to non-selected features.
+
+**Usage**:
+```bash
+git feature project --include Login --include Signup --branch project/Login-Signup
+```
+
+### `git feature sync`
+Sync changes made in a projected branch back into a target branch.
+This copies modified and added files from the projection branch while preserving files that were excluded only by the projection.
+
+**Usage**:
+```bash
+git feature sync project/Login --target dev
+```
+
 ### `git feature blame`
 
 Displays the feature associations for each line of a specified file, similar to `git blame`.
@@ -141,7 +159,18 @@ git feature commits missing
    git feature blame src/main.py
    ```
 
-6. **Display Feature Information**:
+6. **Create a Projected Feature Variant**:
+   ```bash
+   git feature project --include Login --branch project/Login
+   ```
+
+7. **Sync a Projected Variant Back**:
+   ```bash
+   git checkout master
+   git feature sync project/Login --target master
+   ```
+
+8. **Display Feature Information**:
    ```bash
    git feature info feature-x --authors --files --branches
    ```
