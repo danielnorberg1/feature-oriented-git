@@ -324,6 +324,49 @@ def test_sync_projection_back_applies_projection_edits(proj_repo):
     assert "login_v2()" in src.read_text()
 
 
+def test_sync_projection_back_preserves_unselected_features(proj_repo):
+    root = Path(proj_repo.working_tree_dir)
+
+    src = root / "app.py"
+    src.write_text(
+        "# &begin[FeatureA]\n"
+        "feature_a()\n"
+        "# &end[FeatureA]\n"
+        "# &begin[FeatureB]\n"
+        "feature_b()\n"
+        "# &end[FeatureB]\n"
+        "# &begin[FeatureC]\n"
+        "feature_c()\n"
+        "# &end[FeatureC]\n"
+    )
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Add A,B,C")
+
+    source_branch = proj_repo.active_branch.name
+    materialize_projection(proj_repo, {"FeatureA", "FeatureC"}, "project/A-C")
+    proj_repo.git.checkout("project/A-C")
+
+    # Change only FeatureA in the projected branch
+    src.write_text(
+        "# &begin[FeatureA]\n"
+        "feature_a_updated()\n"
+        "# &end[FeatureA]\n"
+        "# &begin[FeatureC]\n"
+        "feature_c()\n"
+        "# &end[FeatureC]\n"
+    )
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Update projected FeatureA")
+
+    proj_repo.git.checkout(source_branch)
+    sync_projection_back(proj_repo, "project/A-C", source_branch)
+
+    text = src.read_text()
+    assert "feature_a_updated()" in text
+    assert "feature_b()" in text
+    assert "feature_c()" in text
+
+
 def test_sync_projection_back_ignores_projection_deletions(proj_repo):
     root = Path(proj_repo.working_tree_dir)
 
