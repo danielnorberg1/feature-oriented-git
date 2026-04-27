@@ -45,14 +45,16 @@ def materialize_file(content: str, selected_features: Set[str]) -> str:
     return "".join(result)
 
 
-def should_include_file(file_path: str, selected_features: Set[str]) -> bool:
+def should_include_file(
+    file_path: str, selected_features: Set[str], repo_root: Path | None = None
+) -> bool:
     """Decide whether a file belongs in the projection.
 
     - No file-config mapping → platform code → always included
     - Mapped to at least one selected feature → included
     - Mapped only to non-selected features → excluded
     """
-    config_features = _features_from_file_mapping(file_path)
+    config_features = _features_from_file_mapping(file_path, repo_root=repo_root)
     if not config_features:
         return True
     return any(f in selected_features for f in config_features)
@@ -110,7 +112,7 @@ def materialize_projection(
                 continue
 
             # File-config exclusion (whole-file feature ownership)
-            if not should_include_file(str(abs_path), selected_features):
+            if not should_include_file(str(abs_path), selected_features, repo_root=repo_root):
                 abs_path.unlink()
                 removed.append(rel_path)
                 continue
@@ -146,3 +148,60 @@ def materialize_projection(
         raise
 
     return branch_name
+
+
+def sync_projection_back(
+    repo: Repo,
+    projection_branch: str,
+    target_branch: str | None = None,
+) -> str:
+    """Synchronize changes from a projected branch back into the target branch.
+
+    This copies modified and added files from the projection branch into the target
+    branch, but ignores deletions caused by the projection step. The goal is to
+    preserve edits made in the projected feature variant without removing files
+    that were excluded from the projection.
+    """
+    if repo.is_dirty(untracked_files=True):
+        raise RuntimeError(
+            "Working tree has uncommitted changes. "
+            "Commit or stash them before syncing the projection back."
+        )
+
+    if projection_branch not in [ref.name for ref in repo.branches]:
+        raise ValueError(f"Projection branch '{projection_branch}' does not exist.")
+
+    if target_branch is None:
+        target_branch = repo.active_branch.name
+
+    if target_branch not in [ref.name for ref in repo.branches]:
+        raise ValueError(f"Target branch '{target_branch}' does not exist.")
+
+    source_branch = repo.active_branch.name
+    if source_branch != target_branch:
+        repo.git.checkout(target_branch)
+
+    diff_lines = repo.git.diff("--name-status", f"{target_branch}..{projection_branch}").splitlines()
+    if not diff_lines:
+        return target_branch
+
+    merged_files = []
+    for line in diff_lines:
+        parts = line.split("\t")
+        status = parts[0]
+        if status == "D":
+            continue
+        # Rename or copy cases have extra fields
+        file_path = parts[-1]
+        repo.git.checkout(projection_branch, "--", file_path)
+        repo.index.add([file_path])
+        merged_files.append(file_path)
+
+    if not merged_files:
+        return target_branch
+
+    repo.index.commit(
+        f"Sync projection '{projection_branch}' back into {target_branch}\n\n"
+        f"Copied changes from projected variant {projection_branch}."
+    )
+    return target_branch
