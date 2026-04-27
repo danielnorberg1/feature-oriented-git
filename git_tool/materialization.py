@@ -10,6 +10,76 @@ _BEGIN_RE = re.compile(r".*&begin\[(?P<name>.*?)\].*")
 _END_RE = re.compile(r".*&end\[(?P<name>.*?)\].*")
 
 
+def parse_annotated_blocks(content: str) -> list[tuple[str, str | None, str]]:
+    """Split file content into shared and annotated feature blocks."""
+    lines = content.splitlines(keepends=True)
+    blocks = []
+    i = 0
+    while i < len(lines):
+        begin_match = _BEGIN_RE.match(lines[i])
+        if begin_match:
+            feature_name = begin_match.group("name")
+            start = i
+            i += 1
+            while i < len(lines):
+                end_match = _END_RE.match(lines[i])
+                if end_match and end_match.group("name") == feature_name:
+                    i += 1
+                    break
+                i += 1
+            blocks.append(("feature", feature_name, "".join(lines[start:i])))
+        else:
+            start = i
+            while i < len(lines) and not _BEGIN_RE.match(lines[i]):
+                i += 1
+            blocks.append(("shared", None, "".join(lines[start:i])))
+    return blocks
+
+
+def merge_projected_changes_into_target(
+    target_content: str, projected_content: str
+) -> str:
+    """Update target content with changes from projected content.
+
+    Only replace shared blocks and matching feature blocks. Keep any extra
+    feature blocks that exist in target but not in the projection.
+    """
+    target_blocks = parse_annotated_blocks(target_content)
+    projected_blocks = parse_annotated_blocks(projected_content)
+
+    merged_blocks = []
+    target_index = 0
+
+    for projected_kind, projected_name, projected_text in projected_blocks:
+        if projected_kind == "feature":
+            # Advance until we find the matching feature block in target.
+            while target_index < len(target_blocks):
+                target_kind, target_name, target_text = target_blocks[target_index]
+                if target_kind == "feature" and target_name == projected_name:
+                    merged_blocks.append((target_kind, target_name, projected_text))
+                    target_index += 1
+                    break
+                merged_blocks.append((target_kind, target_name, target_text))
+                target_index += 1
+        else:
+            # Shared block: replace the next shared block in target.
+            while target_index < len(target_blocks):
+                target_kind, target_name, target_text = target_blocks[target_index]
+                if target_kind == "shared":
+                    merged_blocks.append((target_kind, target_name, projected_text))
+                    target_index += 1
+                    break
+                merged_blocks.append((target_kind, target_name, target_text))
+                target_index += 1
+
+    # Append remaining target blocks unchanged.
+    while target_index < len(target_blocks):
+        merged_blocks.append(target_blocks[target_index])
+        target_index += 1
+
+    return "".join(text for _, _, text in merged_blocks)
+
+
 def materialize_file(content: str, selected_features: Set[str]) -> str:
     """Project a single file given a feature selection.
 
@@ -157,10 +227,8 @@ def sync_projection_back(
 ) -> str:
     """Synchronize changes from a projected branch back into the target branch.
 
-    This copies modified and added files from the projection branch into the target
-    branch, but ignores deletions caused by the projection step. The goal is to
-    preserve edits made in the projected feature variant without removing files
-    that were excluded from the projection.
+    This copies only edits made on the projected branch after the initial
+    projection commit. Deletions caused by the projection step are ignored.
     """
     if repo.is_dirty(untracked_files=True):
         raise RuntimeError(
@@ -181,25 +249,47 @@ def sync_projection_back(
     if source_branch != target_branch:
         repo.git.checkout(target_branch)
 
-    diff_lines = repo.git.diff("--name-status", f"{target_branch}..{projection_branch}").splitlines()
-    if not diff_lines:
+    projection_commit = None
+    for commit in repo.iter_commits(projection_branch):
+        if commit.message.startswith("Project variant:"):
+            projection_commit = commit
+            break
+
+    if projection_commit is None:
+        raise ValueError(
+            f"Projection branch '{projection_branch}' does not appear to be a projection branch."
+        )
+
+    diff_files = repo.git.diff(
+        "--name-only",
+        f"{projection_commit.hexsha}..{projection_branch}",
+        "--diff-filter=ACMRTUXB",
+    ).splitlines()
+    if not diff_files:
         return target_branch
 
-    merged_files = []
-    for line in diff_lines:
-        parts = line.split("\t")
-        status = parts[0]
-        if status == "D":
-            continue
-        # Rename or copy cases have extra fields
-        file_path = parts[-1]
-        repo.git.checkout(projection_branch, "--", file_path)
-        repo.index.add([file_path])
-        merged_files.append(file_path)
+    changed_files = []
+    for file_path in diff_files:
+        target_file = Path(repo.working_tree_dir) / file_path
+        projected_content = repo.git.show(f"{projection_branch}:{file_path}")
 
-    if not merged_files:
+        if target_file.exists():
+            target_content = target_file.read_text(encoding="utf-8")
+            merged_content = merge_projected_changes_into_target(
+                target_content, projected_content
+            )
+            if merged_content != target_content:
+                target_file.write_text(merged_content, encoding="utf-8")
+                changed_files.append(file_path)
+        else:
+            # New file in projection branch: add it directly.
+            target_file.write_text(projected_content, encoding="utf-8")
+            changed_files.append(file_path)
+
+    if not changed_files:
         return target_branch
 
+    repo.index.add(changed_files)
     repo.index.commit(
         f"Sync projection '{projection_branch}' back into {target_branch}\n\n"
         f"Copied changes from projected variant {projection_branch}."
