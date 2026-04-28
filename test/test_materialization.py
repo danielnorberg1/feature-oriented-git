@@ -324,6 +324,36 @@ def test_sync_projection_back_applies_projection_edits(proj_repo):
     assert "login_v2()" in src.read_text()
 
 
+def test_sync_projection_back_refreshes_missing_provenance(proj_repo):
+    root = Path(proj_repo.working_tree_dir)
+
+    src = root / "app.py"
+    src.write_text("# shared\n# &begin[Login]\nlogin_v1()\n# &end[Login]\n")
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Add Login v1")
+
+    source_branch = proj_repo.active_branch.name
+    materialize_projection(proj_repo, {"Login"}, "project/Login-old")
+    proj_repo.git.checkout(source_branch)
+
+    # Update source annotated file before syncing.
+    src.write_text("# shared\n# &begin[Login]\nlogin_v1_updated()\n# &end[Login]\n")
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Update source annotated login")
+
+    proj_repo.git.checkout("project/Login-old")
+    (root / ".feature-provenance.json").unlink()
+    proj_repo.index.remove([".feature-provenance.json"])
+    src.write_text("# shared\nlogin_v2()\n")
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Update projected login without provenance")
+
+    proj_repo.git.checkout(source_branch)
+    sync_projection_back(proj_repo, "project/Login-old", source_branch)
+
+    assert "login_v2()" in src.read_text()
+
+
 def test_sync_projection_back_preserves_unselected_features(proj_repo):
     root = Path(proj_repo.working_tree_dir)
 
@@ -365,6 +395,41 @@ def test_sync_projection_back_preserves_unselected_features(proj_repo):
     assert "feature_a_updated()" in text
     assert "feature_b()" in text
     assert "feature_c()" in text
+
+
+def test_sync_projection_back_preserves_annotation_markers_after_line_deletion(proj_repo):
+    root = Path(proj_repo.working_tree_dir)
+
+    src = root / "app.py"
+    src.write_text(
+        "shared\n"
+        "# &begin[Login]\n"
+        "login1()\n"
+        "login2()\n"
+        "# &end[Login]\n"
+        "shared2\n"
+    )
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Add annotated login sequence")
+
+    source_branch = proj_repo.active_branch.name
+    materialize_projection(proj_repo, {"Login"}, "project/Login")
+    proj_repo.git.checkout("project/Login")
+
+    projected_text = src.read_text().splitlines(keepends=True)
+    filtered = [line for line in projected_text if line.strip() != "login2()"]
+    src.write_text("".join(filtered))
+    proj_repo.index.add(["app.py"])
+    proj_repo.index.commit("Delete projected login line")
+
+    proj_repo.git.checkout(source_branch)
+    sync_projection_back(proj_repo, "project/Login", source_branch)
+
+    merged = src.read_text()
+    assert "login2()" not in merged
+    assert "# &end[Login]" in merged
+    assert merged.index("# &end[Login]") > merged.index("login1()")
+    assert "shared2" in merged
 
 
 def test_sync_projection_back_ignores_projection_deletions(proj_repo):
