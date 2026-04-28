@@ -1,3 +1,5 @@
+import difflib
+import json
 import re
 from pathlib import Path
 from typing import Set
@@ -10,7 +12,119 @@ _BEGIN_RE = re.compile(r".*&begin\[(?P<name>.*?)\].*")
 _END_RE = re.compile(r".*&end\[(?P<name>.*?)\].*")
 
 
-def parse_annotated_blocks(content: str) -> list[tuple[str, str | None, str]]:
+def project_file_with_provenance(content: str, selected_features: Set[str]) -> tuple[str, list[int]]:
+    """Project a file and return the projected content plus provenance.
+
+    The provenance list maps each projected line to the corresponding original
+    annotated source line index.
+    """
+    lines = content.splitlines(keepends=True)
+    projected_lines: list[str] = []
+    provenance: list[int] = []
+    feature_stack: list[str] = []
+
+    for index, line in enumerate(lines):
+        begin_match = _BEGIN_RE.match(line)
+        if begin_match:
+            feature_stack.append(begin_match.group("name"))
+            continue
+
+        end_match = _END_RE.match(line)
+        if end_match and feature_stack and feature_stack[-1] == end_match.group("name"):
+            feature_stack.pop()
+            continue
+
+        if feature_stack:
+            if all(f in selected_features for f in feature_stack):
+                projected_lines.append(line)
+                provenance.append(index)
+        else:
+            projected_lines.append(line)
+            provenance.append(index)
+
+    return ("".join(projected_lines), provenance)
+
+
+def reconstruct_baseline_lines(annotated_lines: list[str], provenance: list[int]) -> list[str]:
+    return [annotated_lines[i] for i in provenance]
+
+
+def apply_provenance_patch(
+    annotated_lines: list[str],
+    provenance: list[int],
+    projected_lines: list[str],
+    opcodes: list[tuple[str, int, int, int, int]],
+) -> list[str]:
+    output = list(annotated_lines)
+
+    for tag, i1, i2, j1, j2 in reversed(opcodes):
+        if tag == "equal":
+            continue
+
+        if tag == "replace" or tag == "delete":
+            start = provenance[i1]
+            end = provenance[i2 - 1] + 1 if i2 > i1 else start
+            output[start:end] = [] if tag == "delete" else projected_lines[j1:j2]
+        elif tag == "insert":
+            if i1 < len(provenance):
+                insert_at = provenance[i1]
+            elif provenance:
+                insert_at = provenance[-1] + 1
+            else:
+                insert_at = len(output)
+            output[insert_at:insert_at] = projected_lines[j1:j2]
+        else:
+            raise ValueError(f"Unsupported diff opcode: {tag}")
+
+    return output
+
+
+def validate_provenance(annotated_lines: list[str], provenance: list[int]) -> None:
+    if not provenance:
+        return
+    if any(idx < 0 or idx >= len(annotated_lines) for idx in provenance):
+        raise ValueError("Invalid provenance mapping: source index out of range")
+    if any(provenance[i] >= provenance[i + 1] for i in range(len(provenance) - 1)):
+        raise ValueError("Invalid provenance mapping: indices are not strictly increasing")
+
+
+def parse_selected_features_from_projection_commit(commit_message: str) -> Set[str]:
+    for line in commit_message.splitlines():
+        if line.startswith("Selected features:"):
+            raw_features = line.split(":", 1)[1].strip()
+            return {feature.strip() for feature in raw_features.split(",") if feature.strip()}
+
+    raise RuntimeError(
+        "Projection branch commit message does not contain selected feature metadata. "
+        "Cannot refresh provenance mapping."
+    )
+
+
+def refresh_provenance_for_file(
+    annotated_content: str, selected_features: Set[str]
+) -> list[int]:
+    _, provenance = project_file_with_provenance(annotated_content, selected_features)
+    return provenance
+
+
+def load_provenance_map(repo: Repo, projection_branch: str) -> dict[str, list[int]]:
+    try:
+        provenance_json = repo.git.show(f"{projection_branch}:.feature-provenance.json")
+    except Exception:
+        return {}
+    data = json.loads(provenance_json)
+    return {path: mapping for path, mapping in data.get("files", {}).items()}
+
+
+def diff_opcodes_normalized(
+    baseline_lines: list[str], projected_lines: list[str]
+) -> list[tuple[str, int, int, int, int]]:
+    baseline_norm = [line.rstrip("\n") for line in baseline_lines]
+    projected_norm = [line.rstrip("\n") for line in projected_lines]
+    return difflib.SequenceMatcher(None, baseline_norm, projected_norm).get_opcodes()
+
+
+def materialize_file(content: str, selected_features: Set[str]) -> str:
     """Split file content into shared and annotated feature blocks."""
     lines = content.splitlines(keepends=True)
     blocks = []
@@ -152,6 +266,7 @@ def materialize_projection(
     repo_root = Path(repo.working_tree_dir)
     source_branch = repo.active_branch.name
     source_sha = repo.head.commit.hexsha
+    provenance_map: dict[str, list[int]] = {}
 
     # Handle existing branch: overwrite if safe, abort if user has unsynced work
     if branch_name in [ref.name for ref in repo.branches]:
@@ -193,15 +308,25 @@ def materialize_projection(
             except (UnicodeDecodeError, ValueError):
                 continue
 
-            projected = materialize_file(content, selected_features)
+            projected, b_to_a = project_file_with_provenance(content, selected_features)
             if projected != content:
                 abs_path.write_text(projected, encoding="utf-8")
                 modified.append(rel_path)
+
+            provenance_map[rel_path] = b_to_a
 
         if removed:
             repo.index.remove(removed)
         if modified:
             repo.index.add(modified)
+
+        if provenance_map:
+            provenance_path = repo_root / ".feature-provenance.json"
+            provenance_path.write_text(
+                json.dumps({"version": 1, "files": provenance_map}, indent=2),
+                encoding="utf-8",
+            )
+            repo.index.add([str(provenance_path.relative_to(repo_root))])
 
         feature_list = ", ".join(sorted(selected_features))
         repo.index.commit(
@@ -260,6 +385,10 @@ def sync_projection_back(
             f"Projection branch '{projection_branch}' does not appear to be a projection branch."
         )
 
+    selected_features = parse_selected_features_from_projection_commit(
+        projection_commit.message
+    )
+
     diff_files = repo.git.diff(
         "--name-only",
         f"{projection_commit.hexsha}..{projection_branch}",
@@ -268,16 +397,43 @@ def sync_projection_back(
     if not diff_files:
         return target_branch
 
+    provenance_map = load_provenance_map(repo, projection_branch)
     changed_files = []
+
     for file_path in diff_files:
         target_file = Path(repo.working_tree_dir) / file_path
-        projected_content = repo.git.show(f"{projection_branch}:{file_path}")
+        try:
+            projected_content = repo.git.show(f"{projection_branch}:{file_path}")
+        except Exception:
+            # Ignore deletions or files that no longer exist in the projection.
+            continue
 
         if target_file.exists():
             target_content = target_file.read_text(encoding="utf-8")
-            merged_content = merge_projected_changes_into_target(
-                target_content, projected_content
+            annotated_lines = target_content.splitlines(keepends=True)
+            projected_lines = projected_content.splitlines(keepends=True)
+
+            if file_path not in provenance_map:
+                provenance_map[file_path] = refresh_provenance_for_file(
+                    target_content, selected_features
+                )
+
+            provenance = provenance_map[file_path]
+            try:
+                validate_provenance(annotated_lines, provenance)
+            except ValueError:
+                provenance = refresh_provenance_for_file(
+                    target_content, selected_features
+                )
+                provenance_map[file_path] = provenance
+
+            baseline_lines = reconstruct_baseline_lines(annotated_lines, provenance)
+
+            opcodes = diff_opcodes_normalized(baseline_lines, projected_lines)
+            merged_lines = apply_provenance_patch(
+                annotated_lines, provenance, projected_lines, opcodes
             )
+            merged_content = "".join(merged_lines)
             if merged_content != target_content:
                 target_file.write_text(merged_content, encoding="utf-8")
                 changed_files.append(file_path)
