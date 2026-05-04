@@ -29,19 +29,19 @@ This tool provides advanced Git feature management, allowing you to associate fe
 
 ## Commands Overview
 
-### `git feature status`
+### `git-feature status`
 
 Displays the current feature status, including staged, unstaged, and untracked files with their associated features.
 
 **Usage**:
 ```bash
-git feature status
+git-feature status
 ```
 ### `git feature add`
 This command helps to associate feature information with a commit that does not yet exist. You can either add the information while adding the files or add features to the staging area.
 If you prefer to keep your workflows as usual and add feature information solely to commits that you already created, you don't need the git hooks and can jump to `git feature-commit`.
 
-#### `git feature add`
+#### `git-feature add`
 
 Associates specified features with staged files. You can stage specific files or all tracked changes.
 
@@ -51,8 +51,8 @@ Associates specified features with staged files. You can stage specific files or
 
 **Usage**:
 ```bash
-git feature add --all <feature-names>
-git feature add --files <file>... <feature-names>
+git-feature add --all <feature-names>
+git-feature add --files <file>... <feature-names>
 ```
 
 #### `git feature add-from-staged`
@@ -61,7 +61,7 @@ Uses staged files to associate them with feature information.
 
 **Usage**:
 ```bash
-git feature add-from-staged
+git-feature add-from-staged
 ```
 
 
@@ -69,7 +69,7 @@ git feature add-from-staged
 Assign features to a commit retroactively. To find all commits that have not yet features assigned, see ---
 **Usage**:
 ```bash
-git feature commit <commit_id> <features>
+git-feature commit <commit_id> <features>
 ```
 
 ### `git feature project`
@@ -78,7 +78,7 @@ This removes unselected annotated code blocks and excludes files mapped only to 
 
 **Usage**:
 ```bash
-git feature project --include Login --include Signup --branch project/Login-Signup
+git-feature project project --include Login --include Signup --branch project/Login-Signup
 ```
 
 ### `git feature sync`
@@ -87,7 +87,7 @@ This copies modified and added files from the projection branch while preserving
 
 **Usage**:
 ```bash
-git feature sync project/Login --target dev
+git-feature sync project/Login --target dev
 ```
 
 ### `git feature blame`
