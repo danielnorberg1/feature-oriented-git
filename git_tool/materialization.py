@@ -135,24 +135,31 @@ def parse_selected_features_from_projection_commit(commit_message: str) -> Set[s
 
     raise RuntimeError(
         "Projection branch commit message does not contain selected feature metadata. "
-        "Cannot refresh provenance mapping."
+        "Cannot determine selected features."
     )
 
 
-def refresh_provenance_for_file(
-    annotated_content: str, selected_features: Set[str]
-) -> list[int]:
-    _, provenance = project_file_with_provenance(annotated_content, selected_features)
-    return provenance
+def load_provenance(
+    repo: Repo, projection_branch: str
+) -> tuple[str | None, dict[str, list[int]]]:
+    """Load provenance map and source SHA from the projection branch.
 
-
-def load_provenance_map(repo: Repo, projection_branch: str) -> dict[str, list[int]]:
+    Returns (source_sha, {file_path: provenance_list}).
+    Raises RuntimeError if the provenance file is missing.
+    """
     try:
         provenance_json = repo.git.show(f"{projection_branch}:.feature-provenance.json")
     except Exception:
-        return {}
+        raise RuntimeError(
+            f"Projection branch '{projection_branch}' has no .feature-provenance.json. "
+            "Re-project before syncing back."
+        )
     data = json.loads(provenance_json)
-    return {path: mapping for path, mapping in data.get("files", {}).items()}
+    source_sha = data.get("source_sha")
+    file_map: dict[str, list[int]] = {
+        path: mapping for path, mapping in data.get("files", {}).items()
+    }
+    return source_sha, file_map
 
 
 def diff_opcodes_normalized(
@@ -161,76 +168,6 @@ def diff_opcodes_normalized(
     baseline_norm = [line.rstrip("\n") for line in baseline_lines]
     projected_norm = [line.rstrip("\n") for line in projected_lines]
     return difflib.SequenceMatcher(None, baseline_norm, projected_norm).get_opcodes()
-
-
-def materialize_file(content: str, selected_features: Set[str]) -> str:
-    """Split file content into shared and annotated feature blocks."""
-    lines = content.splitlines(keepends=True)
-    blocks = []
-    i = 0
-    while i < len(lines):
-        begin_match = _BEGIN_RE.match(lines[i])
-        if begin_match:
-            feature_name = begin_match.group("name")
-            start = i
-            i += 1
-            while i < len(lines):
-                end_match = _END_RE.match(lines[i])
-                if end_match and end_match.group("name") == feature_name:
-                    i += 1
-                    break
-                i += 1
-            blocks.append(("feature", feature_name, "".join(lines[start:i])))
-        else:
-            start = i
-            while i < len(lines) and not _BEGIN_RE.match(lines[i]):
-                i += 1
-            blocks.append(("shared", None, "".join(lines[start:i])))
-    return blocks
-
-
-def merge_projected_changes_into_target(
-    target_content: str, projected_content: str
-) -> str:
-    """Update target content with changes from projected content.
-
-    Only replace shared blocks and matching feature blocks. Keep any extra
-    feature blocks that exist in target but not in the projection.
-    """
-    target_blocks = parse_annotated_blocks(target_content)
-    projected_blocks = parse_annotated_blocks(projected_content)
-
-    merged_blocks = []
-    target_index = 0
-
-    for projected_kind, projected_name, projected_text in projected_blocks:
-        if projected_kind == "feature":
-            # Advance until we find the matching feature block in target.
-            while target_index < len(target_blocks):
-                target_kind, target_name, target_text = target_blocks[target_index]
-                if target_kind == "feature" and target_name == projected_name:
-                    merged_blocks.append((target_kind, target_name, projected_text))
-                    target_index += 1
-                    break
-                merged_blocks.append((target_kind, target_name, target_text))
-                target_index += 1
-        else:
-            # Shared block: replace the next shared block in target.
-            while target_index < len(target_blocks):
-                target_kind, target_name, target_text = target_blocks[target_index]
-                if target_kind == "shared":
-                    merged_blocks.append((target_kind, target_name, projected_text))
-                    target_index += 1
-                    break
-                merged_blocks.append((target_kind, target_name, target_text))
-                target_index += 1
-
-    # Append remaining target blocks unchanged.
-    while target_index < len(target_blocks):
-        merged_blocks.append(target_blocks[target_index])
-        target_index += 1
-
-    return "".join(text for _, _, text in merged_blocks)
 
 
 def materialize_file(content: str, selected_features: Set[str]) -> str:
@@ -362,7 +299,10 @@ def materialize_projection(
         if provenance_map:
             provenance_path = repo_root / ".feature-provenance.json"
             provenance_path.write_text(
-                json.dumps({"version": 1, "files": provenance_map}, indent=2),
+                json.dumps(
+                    {"version": 1, "source_sha": source_sha, "files": provenance_map},
+                    indent=2,
+                ),
                 encoding="utf-8",
             )
             repo.index.add([str(provenance_path.relative_to(repo_root))])
@@ -391,8 +331,11 @@ def sync_projection_back(
 ) -> str:
     """Synchronize changes from a projected branch back into the target branch.
 
-    This copies only edits made on the projected branch after the initial
-    projection commit. Deletions caused by the projection step are ignored.
+    Only edits made on the projected branch after the initial projection commit
+    are applied. Annotation markers in the target are always preserved.
+
+    Raises RuntimeError if the target file has changed since the projection was
+    made — re-project first to get a fresh baseline.
     """
     if repo.is_dirty(untracked_files=True):
         raise RuntimeError(
@@ -424,10 +367,6 @@ def sync_projection_back(
             f"Projection branch '{projection_branch}' does not appear to be a projection branch."
         )
 
-    selected_features = parse_selected_features_from_projection_commit(
-        projection_commit.message
-    )
-
     diff_files = repo.git.diff(
         "--name-only",
         f"{projection_commit.hexsha}..{projection_branch}",
@@ -436,7 +375,9 @@ def sync_projection_back(
     if not diff_files:
         return target_branch
 
-    provenance_map = load_provenance_map(repo, projection_branch)
+    # load_provenance raises RuntimeError if the file is missing.
+    source_sha, provenance_map = load_provenance(repo, projection_branch)
+
     changed_files = []
 
     for file_path in diff_files:
@@ -444,41 +385,53 @@ def sync_projection_back(
         try:
             projected_content = repo.git.show(f"{projection_branch}:{file_path}")
         except Exception:
-            # Ignore deletions or files that no longer exist in the projection.
+            # File was deleted in the projection branch — skip.
             continue
 
-        if target_file.exists():
-            target_content = target_file.read_text(encoding="utf-8")
-            annotated_lines = target_content.splitlines(keepends=True)
-            projected_lines = projected_content.splitlines(keepends=True)
-
-            if file_path not in provenance_map:
-                provenance_map[file_path] = refresh_provenance_for_file(
-                    target_content, selected_features
-                )
-
-            provenance = provenance_map[file_path]
-            try:
-                validate_provenance(annotated_lines, provenance)
-            except ValueError:
-                provenance = refresh_provenance_for_file(
-                    target_content, selected_features
-                )
-                provenance_map[file_path] = provenance
-
-            baseline_lines = reconstruct_baseline_lines(annotated_lines, provenance)
-
-            opcodes = diff_opcodes_normalized(baseline_lines, projected_lines)
-            merged_lines = apply_provenance_patch(
-                annotated_lines, provenance, projected_lines, opcodes
-            )
-            merged_content = "".join(merged_lines)
-            if merged_content != target_content:
-                target_file.write_text(merged_content, encoding="utf-8")
-                changed_files.append(file_path)
-        else:
-            # New file in projection branch: add it directly.
+        if not target_file.exists():
+            # New file added in the projection branch — copy it directly.
             target_file.write_text(projected_content, encoding="utf-8")
+            changed_files.append(file_path)
+            continue
+
+        # Guard: reject if the annotated source changed since the projection.
+        if source_sha:
+            changed_since = repo.git.diff(
+                "--name-only", f"{source_sha}..HEAD", "--", file_path
+            )
+            if changed_since:
+                raise RuntimeError(
+                    f"'{file_path}' in '{target_branch}' has changed since the projection "
+                    f"was made. Re-project from '{target_branch}' before syncing back."
+                )
+
+        if file_path not in provenance_map:
+            raise RuntimeError(
+                f"'{file_path}' has no provenance entry in .feature-provenance.json. "
+                "Re-project before syncing back."
+            )
+
+        target_content = target_file.read_text(encoding="utf-8")
+        annotated_lines = target_content.splitlines(keepends=True)
+        provenance = provenance_map[file_path]
+
+        try:
+            validate_provenance(annotated_lines, provenance)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Provenance mapping for '{file_path}' is invalid — the annotated source "
+                "may have changed since the projection. Re-project before syncing back."
+            ) from exc
+
+        baseline_lines = reconstruct_baseline_lines(annotated_lines, provenance)
+        projected_lines = projected_content.splitlines(keepends=True)
+        opcodes = diff_opcodes_normalized(baseline_lines, projected_lines)
+        merged_lines = apply_provenance_patch(
+            annotated_lines, provenance, projected_lines, opcodes
+        )
+        merged_content = "".join(merged_lines)
+        if merged_content != target_content:
+            target_file.write_text(merged_content, encoding="utf-8")
             changed_files.append(file_path)
 
     if not changed_files:
