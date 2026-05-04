@@ -55,24 +55,63 @@ def apply_provenance_patch(
     projected_lines: list[str],
     opcodes: list[tuple[str, int, int, int, int]],
 ) -> list[str]:
+    """Apply diff opcodes to the annotated source using the provenance map.
+
+    Processes opcodes in reverse order so that later (higher-index) source
+    positions are modified first, keeping earlier positions stable.
+
+    For replace/delete, each source line is touched individually at its exact
+    provenance position rather than via a slice — this prevents annotation
+    markers and excluded-feature lines that sit in provenance gaps from being
+    swept away.
+
+    Replace semantics (option B):
+      - Equal-length: 1-to-1 substitution at each provenance position.
+      - Shrink (old > new): substitute the first `new` lines, delete the rest.
+      - Grow (new > old): substitute all `old` lines, insert the remainder
+        immediately after the last substituted source line.
+
+    Insert position uses "outgoing context": new lines land right after the
+    preceding mapped source line, before any annotation boundary that follows.
+    """
     output = list(annotated_lines)
 
     for tag, i1, i2, j1, j2 in reversed(opcodes):
         if tag == "equal":
             continue
 
-        if tag == "replace" or tag == "delete":
-            start = provenance[i1]
-            end = provenance[i2 - 1] + 1 if i2 > i1 else start
-            output[start:end] = [] if tag == "delete" else projected_lines[j1:j2]
+        elif tag == "delete":
+            for i in range(i2 - 1, i1 - 1, -1):
+                del output[provenance[i]]
+
+        elif tag == "replace":
+            old_count = i2 - i1
+            new_count = j2 - j1
+            pair_count = min(old_count, new_count)
+
+            # 1-to-1 substitution for paired lines (no length change, indices stable)
+            for k in range(pair_count):
+                output[provenance[i1 + k]] = projected_lines[j1 + k]
+
+            if old_count > new_count:
+                # Delete unpaired tail (high indices first to keep lower ones stable)
+                for i in range(i2 - 1, i1 + new_count - 1, -1):
+                    del output[provenance[i]]
+            elif new_count > old_count:
+                # Insert unpaired head after the last substituted source line
+                insert_at = provenance[i2 - 1] + 1
+                output[insert_at:insert_at] = projected_lines[j1 + pair_count:j2]
+
         elif tag == "insert":
-            if i1 < len(provenance):
-                insert_at = provenance[i1]
-            elif provenance:
-                insert_at = provenance[-1] + 1
+            # Outgoing context: land right after the preceding mapped source line.
+            if i1 == 0:
+                insert_at = provenance[0] if provenance else 0
+            elif i1 <= len(provenance):
+                insert_at = provenance[i1 - 1] + 1
             else:
-                insert_at = len(output)
+                insert_at = provenance[-1] + 1 if provenance else len(output)
             output[insert_at:insert_at] = projected_lines[j1:j2]
+
         else:
             raise ValueError(f"Unsupported diff opcode: {tag}")
 
