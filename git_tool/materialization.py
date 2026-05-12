@@ -12,15 +12,19 @@ _BEGIN_RE = re.compile(r".*&begin\[(?P<name>.*?)\].*")
 _END_RE = re.compile(r".*&end\[(?P<name>.*?)\].*")
 
 
-def project_file_with_provenance(content: str, selected_features: Set[str]) -> tuple[str, list[int]]:
-    """Project a file and return the projected content plus provenance.
+def project_file_with_provenance(
+    content: str, selected_features: Set[str]
+) -> tuple[str, list[int], list[list[str]]]:
+    """Project a file and return (projected_content, provenance, stacks).
 
-    The provenance list maps each projected line to the corresponding original
-    annotated source line index.
+    provenance[i] is the source line index for projected line i.
+    stacks[i] is the feature stack at that source line: empty list means
+    platform code, non-empty means the line is inside those feature annotations.
     """
     lines = content.splitlines(keepends=True)
     projected_lines: list[str] = []
     provenance: list[int] = []
+    stacks: list[list[str]] = []
     feature_stack: list[str] = []
 
     for index, line in enumerate(lines):
@@ -38,11 +42,13 @@ def project_file_with_provenance(content: str, selected_features: Set[str]) -> t
             if all(f in selected_features for f in feature_stack):
                 projected_lines.append(line)
                 provenance.append(index)
+                stacks.append(list(feature_stack))
         else:
             projected_lines.append(line)
             provenance.append(index)
+            stacks.append([])
 
-    return ("".join(projected_lines), provenance)
+    return ("".join(projected_lines), provenance, stacks)
 
 
 def reconstruct_baseline_lines(annotated_lines: list[str], provenance: list[int]) -> list[str]:
@@ -141,10 +147,12 @@ def parse_selected_features_from_projection_commit(commit_message: str) -> Set[s
 
 def load_provenance(
     repo: Repo, projection_branch: str
-) -> tuple[str | None, dict[str, list[int]]]:
+) -> tuple[str | None, dict[str, list[int]], dict[str, list[list[str]]]]:
     """Load provenance map and source SHA from the projection branch.
 
-    Returns (source_sha, {file_path: provenance_list}).
+    Returns (source_sha, lines_map, stacks_map) where lines_map maps each
+    file path to its provenance line indices and stacks_map maps each file
+    path to the feature stacks per projected line (empty list = platform code).
     Raises RuntimeError if the provenance file is missing.
     """
     try:
@@ -156,10 +164,15 @@ def load_provenance(
         )
     data = json.loads(provenance_json)
     source_sha = data.get("source_sha")
-    file_map: dict[str, list[int]] = {
-        path: mapping for path, mapping in data.get("files", {}).items()
-    }
-    return source_sha, file_map
+    lines_map: dict[str, list[int]] = {}
+    stacks_map: dict[str, list[list[str]]] = {}
+    for path, mapping in data.get("files", {}).items():
+        if isinstance(mapping, dict):
+            lines_map[path] = mapping["lines"]
+            stacks_map[path] = mapping.get("stacks", [])
+        else:
+            lines_map[path] = mapping
+    return source_sha, lines_map, stacks_map
 
 
 def diff_opcodes_normalized(
@@ -242,7 +255,7 @@ def materialize_projection(
     repo_root = Path(repo.working_tree_dir)
     source_branch = repo.active_branch.name
     source_sha = repo.head.commit.hexsha
-    provenance_map: dict[str, list[int]] = {}
+    provenance_map: dict[str, dict] = {}
 
     # Handle existing branch: overwrite if safe, abort if user has unsynced work
     if branch_name in [ref.name for ref in repo.branches]:
@@ -284,12 +297,12 @@ def materialize_projection(
             except (UnicodeDecodeError, ValueError):
                 continue
 
-            projected, b_to_a = project_file_with_provenance(content, selected_features)
+            projected, b_to_a, b_stacks = project_file_with_provenance(content, selected_features)
             if projected != content:
                 abs_path.write_text(projected, encoding="utf-8")
                 modified.append(rel_path)
 
-            provenance_map[rel_path] = b_to_a
+            provenance_map[rel_path] = {"lines": b_to_a, "stacks": b_stacks}
 
         if removed:
             repo.index.remove(removed)
@@ -376,7 +389,7 @@ def sync_projection_back(
         return target_branch
 
     # load_provenance raises RuntimeError if the file is missing.
-    source_sha, provenance_map = load_provenance(repo, projection_branch)
+    source_sha, provenance_map, _ = load_provenance(repo, projection_branch)
 
     changed_files = []
 
@@ -443,3 +456,96 @@ def sync_projection_back(
         f"Copied changes from projected variant {projection_branch}."
     )
     return target_branch
+
+
+def check_projection_staged(repo: Repo) -> list[str]:
+    """Validate that staged changes on a projection branch only touch feature lines.
+
+    Diffs the staged content against the original projection baseline commit so
+    that stacks (which are indexed to the baseline) remain aligned regardless of
+    how many user commits have accumulated on the branch.
+
+    Returns a list of human-readable violation messages; empty means clean.
+    Only active when .feature-provenance.json is present in the working tree.
+    """
+    repo_root = Path(repo.working_tree_dir)
+    provenance_path = repo_root / ".feature-provenance.json"
+    if not provenance_path.exists():
+        return []
+
+    data = json.loads(provenance_path.read_text(encoding="utf-8"))
+    file_stacks: dict[str, list[list[str]]] = {}
+    for path, mapping in data.get("files", {}).items():
+        if isinstance(mapping, dict) and "stacks" in mapping:
+            file_stacks[path] = mapping["stacks"]
+
+    if not file_stacks:
+        return []
+
+    # Find the original projection baseline commit on this branch.
+    projection_commit = None
+    for commit in repo.iter_commits("HEAD"):
+        if commit.message.startswith("Project variant:"):
+            projection_commit = commit
+            break
+
+    if projection_commit is None:
+        return []
+
+    violations: list[str] = []
+
+    for diff_item in repo.index.diff(repo.head.commit):
+        file_path = diff_item.b_path or diff_item.a_path
+        if file_path not in file_stacks:
+            continue
+
+        stacks = file_stacks[file_path]
+
+        try:
+            baseline_content = repo.git.show(f"{projection_commit.hexsha}:{file_path}")
+        except Exception:
+            continue
+
+        if diff_item.b_blob is None:
+            # File deleted from staging area — reject if any baseline line is platform code.
+            for i, stack in enumerate(stacks):
+                if not stack:
+                    violations.append(
+                        f"{file_path}: cannot delete platform code (line {i + 1} in projection baseline)"
+                    )
+            continue
+
+        staged_content = diff_item.b_blob.data_stream.read().decode("utf-8")
+        baseline_lines = baseline_content.splitlines(keepends=True)
+        staged_lines = staged_content.splitlines(keepends=True)
+        opcodes = diff_opcodes_normalized(baseline_lines, staged_lines)
+
+        for tag, i1, i2, j1, j2 in opcodes:
+            if tag == "equal":
+                continue
+
+            if tag in ("delete", "replace"):
+                for i in range(i1, i2):
+                    if i < len(stacks) and not stacks[i]:
+                        violations.append(
+                            f"{file_path}: cannot modify platform code at line {i + 1} of the projection baseline"
+                        )
+
+            # For inserts (pure insert or the extra tail of a growing replace),
+            # check that the insertion point is inside a feature block by looking
+            # at the stack of the line immediately before the insert position.
+            if tag == "insert" or (tag == "replace" and (j2 - j1) > (i2 - i1)):
+                insert_at = i1 if tag == "insert" else i2
+                if insert_at == 0:
+                    before_stack: list[str] = []
+                elif insert_at <= len(stacks):
+                    before_stack = stacks[insert_at - 1]
+                else:
+                    before_stack = stacks[-1] if stacks else []
+
+                if not before_stack:
+                    violations.append(
+                        f"{file_path}: cannot insert lines at position {insert_at + 1} — that location is platform code territory"
+                    )
+
+    return violations
