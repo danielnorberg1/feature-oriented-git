@@ -12,7 +12,7 @@ import typer
 
 load_dotenv(Path(__file__).parents[1].joinpath(".env").absolute())
 FEATURE_BRANCH_NAME = os.getenv("BRANCH_NAME", "feature-metadata")
-# FEATURE_BRANCH_NAME = "feature6-metadata"
+# FEATURE_BRANCH_NAME = "feature-metadata"
 MAIN_BRANCH_NAME = os.getenv("MAIN_BRANCH_NAME", "main")
 REPO_PATH = os.getenv("REPO_PATH", os.getcwd())
 assert FEATURE_BRANCH_NAME is not None

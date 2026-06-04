@@ -62,9 +62,11 @@ def get_features_for_diff(diff: Diff) -> list[FeatureMatches]:
 FEATURE_MAP_FILENAME = ".feature-map.json"
 
 
-def _find_feature_map() -> Path | None:
-    """Walk up from cwd to find a .feature-map.json file."""
-    current = Path.cwd()
+def _find_feature_map(start_dir: Path | None = None) -> Path | None:
+    """Walk up from the provided start directory to find a .feature-map.json file."""
+    if start_dir is None:
+        start_dir = Path.cwd()
+    current = start_dir.resolve()
     for parent in [current, *current.parents]:
         candidate = parent / FEATURE_MAP_FILENAME
         if candidate.is_file():
@@ -72,9 +74,9 @@ def _find_feature_map() -> Path | None:
     return None
 
 
-def _load_feature_map() -> list[dict]:
-    """Load mappings from .feature-map.json. Returns empty list if not found."""
-    path = _find_feature_map()
+def _load_feature_map(start_dir: Path | None = None) -> list[dict]:
+    """Load mappings from .feature-map.json relative to the given directory. Returns empty list if not found."""
+    path = _find_feature_map(start_dir=start_dir)
     if path is None:
         return []
     with open(path, "r", encoding="utf-8") as f:
@@ -82,11 +84,12 @@ def _load_feature_map() -> list[dict]:
     return data.get("mappings", [])
 
 
-def _features_from_file_mapping(file_name: str) -> list[str]:
+def _features_from_file_mapping(file_name: str, repo_root: Path | None = None) -> list[str]:
     """Match a file path against glob patterns in .feature-map.json."""
-    mappings = _load_feature_map()
+    mappings = _load_feature_map(start_dir=repo_root)
     try:
-        rel_path = str(Path(file_name).resolve().relative_to(Path.cwd().resolve()))
+        root_dir = repo_root.resolve() if repo_root is not None else Path.cwd().resolve()
+        rel_path = str(Path(file_name).resolve().relative_to(root_dir))
     except ValueError:
         rel_path = file_name
     features = []
