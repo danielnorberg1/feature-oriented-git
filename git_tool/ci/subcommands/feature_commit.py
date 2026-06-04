@@ -1,18 +1,12 @@
 from datetime import datetime
 import typer
 
-from git_tool.feature_data.add_feature_data.add_data import (
-    add_fact_to_metadata_branch,
-)
-from git_tool.feature_data.models_and_context.fact_model import (
-    ChangeHolder,
-    FeatureFactModel,
-)
 from git_tool.feature_data.models_and_context.feature_state import (
     read_staged_featureset,
     reset_staged_featureset,
 )
 from git_tool.feature_data.models_and_context.repo_context import repo_context, sync_feature_branch
+from git_tool.finding_features import derive_features_from_commit
 
 
 app = typer.Typer(
@@ -57,12 +51,23 @@ def feature_commit(
         staged_features = read_staged_featureset()
         typer.echo(f"Selecting features {staged_features}")
         if not staged_features:
-            typer.echo("No feature information available.", err=True)
-            return
+            # Auto-derive: extract features from files touched by this commit
+            staged_features = derive_features_from_commit(commit_obj)
+            if staged_features:
+                typer.echo(f"Auto-derived features from annotations: {staged_features}")
+            else:
+                typer.echo("No feature information available.", err=True)
+                return
     else:
         staged_features = features
         typer.echo(f"Selecting features from cli parameters {staged_features}")
     # typer.echo("Step 3: Add a feature meta commit on meta data branch")
+    from git_tool.feature_data.add_feature_data.add_data import add_fact_to_metadata_branch
+    from git_tool.feature_data.models_and_context.fact_model import (
+        ChangeHolder,
+        FeatureFactModel,
+    )
+
     with repo_context() as repo:
         feature_fact = FeatureFactModel(
             commit=commit_id,
@@ -75,7 +80,7 @@ def feature_commit(
         )
         # Add the fact to the metadata branch
         add_fact_to_metadata_branch(fact=feature_fact, commit_ref=commit_obj)
-        typer.echo(f"Features {features} assigned to {commit_id}")
+        typer.echo(f"Features {staged_features} assigned to {commit_id}")
         
         if upload:
             sync_feature_branch()
@@ -84,6 +89,16 @@ def feature_commit(
         
     
     # typer.echo("Feature commit process completed successfully.")
+
+
+@app.command(
+    name="sync",
+    help="Synchronize the feature metadata branch with the remote.",
+    no_args_is_help=True,
+)
+def sync_feature_metadata():
+    with repo_context():
+        sync_feature_branch()
 
 
 if __name__ == "__main__":

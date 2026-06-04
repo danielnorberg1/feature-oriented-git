@@ -9,6 +9,7 @@ from git_tool.ci.subcommands.feature_commits import app as feature_commits
 from git_tool.ci.subcommands.feature_info import inspect_feature
 from git_tool.ci.subcommands.feature_info_all import all_feature_info
 from git_tool.ci.subcommands.feature_pre_commit import feature_pre_commit
+from git_tool.ci.subcommands.feature_project import app as feature_project
 from git_tool.ci.subcommands.feature_status import feature_status
 
 
@@ -22,6 +23,7 @@ app.add_typer(feature_commits, name="commits", help="Use with the subcommand 'li
 app.command(name="info", help="Show information of a specific feature.")(inspect_feature)
 app.command(name="info-all", help="List all available features in the project.")(all_feature_info)
 app.command(name="pre-commit", help="Check if all staged changes are properly associated with features.")(feature_pre_commit)
+app.add_typer(feature_project, name="project", help="Materialize a product variant by selecting features to include.")
 app.command(name="status", help="Display unstaged and staged changes with associated features.")(feature_status)
 
 
